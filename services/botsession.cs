@@ -92,6 +92,22 @@ namespace TelegramBot.Services
 
             if (!isAdmin)
             {
+                // Handle user multi-step states
+                var userState = GetState(userId);
+                if (userState == "support_msg")
+                {
+                    if (text == "/cancel" || text == BTN_PROFILE || text == BTN_SUPPORT)
+                    {
+                        ClearState(userId);
+                        if (text == BTN_PROFILE) { await ShowUserProfileAsync(bot, msg, ct); return; }
+                        if (text == BTN_SUPPORT) { await HandleSupportAsync(bot, msg, ct); return; }
+                        await bot.SendMessage(msg.Chat.Id, "↩️  Отменено.", replyMarkup: UserMenu, cancellationToken: ct);
+                        return;
+                    }
+                    await SendSupportMessageAsync(bot, msg, userId, text, ct);
+                    return;
+                }
+
                 if (text == BTN_PROFILE) { await ShowUserProfileAsync(bot, msg, ct); return; }
                 if (text == BTN_SUPPORT) { await HandleSupportAsync(bot, msg, ct); return; }
 
@@ -228,16 +244,25 @@ namespace TelegramBot.Services
 
         async Task HandleSupportAsync(ITelegramBotClient bot, Message msg, CancellationToken ct)
         {
+            long userId = msg.From?.Id ?? 0;
+            SetState(userId, "support_msg");
+            await bot.SendMessage(msg.Chat.Id,
+                "🆘  <b>Обращение в поддержку</b>\n\nНапишите ваш вопрос или проблему — сообщение будет передано администратору.\n\n/cancel — отмена",
+                parseMode: ParseMode.Html, replyMarkup: UserMenu, cancellationToken: ct);
+        }
+
+        async Task SendSupportMessageAsync(ITelegramBotClient bot, Message msg, long userId, string text, CancellationToken ct)
+        {
+            ClearState(userId);
             string firstName = msg.From?.FirstName ?? "";
             string username  = msg.From?.Username  ?? "";
-            long userId      = msg.From?.Id ?? 0;
 
             string who = string.IsNullOrEmpty(username)
                 ? firstName + "  (ID: " + userId + ")"
                 : "@" + username + "  /  " + firstName + "  (ID: " + userId + ")";
 
             await bot.SendMessage(_conf.admin_id,
-                "🆘  <b>Запрос поддержки</b>\n\n👤  " + who,
+                "🆘  <b>Запрос поддержки</b>\n\n👤  " + who + "\n\n💬  " + text,
                 parseMode: ParseMode.Html,
                 replyMarkup: new InlineKeyboardMarkup(new[]
                 {
@@ -246,7 +271,7 @@ namespace TelegramBot.Services
                 cancellationToken: ct);
 
             await bot.SendMessage(msg.Chat.Id,
-                "🆘  Запрос отправлен администратору.\nОжидайте ответа.",
+                "🆘  Сообщение отправлено администратору.\nОжидайте ответа.",
                 replyMarkup: UserMenu, cancellationToken: ct);
         }
 
