@@ -1,4 +1,5 @@
 using System;
+using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 
 namespace TelegramBot.Models
@@ -7,6 +8,9 @@ namespace TelegramBot.Models
     {
         [JsonPropertyName("id")]
         public string Id { get; set; } = "";
+
+        [JsonPropertyName("tg_id")]
+        public long TgId { get; set; } = 0;
 
         [JsonPropertyName("group")]
         public int Group { get; set; } = 1;
@@ -19,6 +23,14 @@ namespace TelegramBot.Models
 
         [JsonPropertyName("params")]
         public LampacUserParams Params { get; set; } = new();
+
+        public static string GenerateToken()
+        {
+            Span<byte> bytes = stackalloc byte[4];
+            RandomNumberGenerator.Fill(bytes);
+            uint n = BitConverter.ToUInt32(bytes) % 900_000_000u + 100_000_000u;
+            return n.ToString();
+        }
     }
 
     public class LampacUserParams

@@ -111,7 +111,7 @@ namespace TelegramBot.Services
                 if (text == BTN_PROFILE) { await ShowUserProfileAsync(bot, msg, ct); return; }
                 if (text == BTN_SUPPORT) { await HandleSupportAsync(bot, msg, ct); return; }
 
-                var existing = _repo.GetById(userId.ToString());
+                var existing = _repo.GetByTgId(userId);
                 if (existing == null)
                 {
                     var kb = new InlineKeyboardMarkup(new[]
@@ -154,7 +154,7 @@ namespace TelegramBot.Services
                 return;
             }
 
-            var existing = _repo.GetById(userId.ToString());
+            var existing = _repo.GetByTgId(userId);
             if (existing != null)
             {
                 var exp = ParseExpiry(existing.Expires);
@@ -214,7 +214,7 @@ namespace TelegramBot.Services
         async Task ShowUserProfileAsync(ITelegramBotClient bot, Message msg, CancellationToken ct)
         {
             long userId = msg.From?.Id ?? 0;
-            var user = _repo.GetById(userId.ToString());
+            var user = _repo.GetByTgId(userId);
             if (user == null)
             {
                 var kb = new InlineKeyboardMarkup(new[]
@@ -233,9 +233,11 @@ namespace TelegramBot.Services
             await bot.SendMessage(msg.Chat.Id,
                 "📋  <b>Мой профиль</b>\n\n" +
                 "┌  <b>" + user.Comment + "</b>\n" +
-                "│  🆔  <code>" + user.Id + "</code>\n" +
                 "│  📅  до  <b>" + exp.ToString("dd.MM.yyyy") + "</b>\n" +
                 "│  " + (active ? "✅  Активен · " + days + " дн." : "❌  Истёк") + "\n" +
+                "│\n" +
+                "│  🔑  <b>ID для подключения:</b>\n" +
+                "│  <code>" + user.Id + "</code>\n" +
                 "└─────────────────",
                 parseMode: ParseMode.Html,
                 replyMarkup: UserMenu,
@@ -568,9 +570,11 @@ namespace TelegramBot.Services
             bool active  = exp >= DateTime.UtcNow;
             int daysLeft = (int)(exp - DateTime.UtcNow).TotalDays;
             string status = active ? "✅  Активен · " + daysLeft + " дн." : "❌  Истёк";
+            string tgLine = u.TgId != 0 ? "│  👤 TG:  <code>" + u.TgId + "</code>\n" : "";
             return
                 "┌  <b>" + u.Comment + "</b>\n" +
-                "│  🆔  <code>" + u.Id + "</code>\n" +
+                tgLine +
+                "│  🔑  <code>" + u.Id + "</code>\n" +
                 "│  📅  до  <b>" + exp.ToString("dd.MM.yyyy") + "</b>\n" +
                 "│  " + status + "\n" +
                 "└─────────────────";
@@ -662,11 +666,11 @@ namespace TelegramBot.Services
 
             foreach (var (user, exp) in expiringSoon)
             {
-                if (!long.TryParse(user.Id, out long uid)) continue;
+                if (user.TgId == 0) continue;
                 int days = Math.Max(1, (int)(exp - DateTime.UtcNow).TotalDays);
                 try
                 {
-                    await bot.SendMessage(uid,
+                    await bot.SendMessage(user.TgId,
                         "⏰  Срок доступа истекает через <b>" + days + " дн.</b>  (" + exp.ToString("dd.MM.yyyy") + ")\n\n" +
                         "Обратитесь к администратору для продления.",
                         parseMode: ParseMode.Html,
@@ -675,7 +679,7 @@ namespace TelegramBot.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning("[TelegramBot] Не удалось уведомить пользователя {Uid}: {Msg}", uid, ex.Message);
+                    _logger.LogWarning("[TelegramBot] Не удалось уведомить пользователя {Uid}: {Msg}", user.TgId, ex.Message);
                 }
             }
 
@@ -718,7 +722,7 @@ namespace TelegramBot.Services
                     return;
                 }
 
-                var existingUser = _repo.GetById(rid.ToString());
+                var existingUser = _repo.GetByTgId(rid);
                 if (existingUser != null && ParseExpiry(existingUser.Expires) >= DateTime.UtcNow)
                 {
                     await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
@@ -858,15 +862,21 @@ namespace TelegramBot.Services
                 string comment = sep >= 0 ? remainder.Substring(sep + 1) : "";
                 ClearState(callerId);
 
-                if (_repo.Exists(nid))
+                if (!long.TryParse(nid, out long newTgId))
+                {
+                    await bot.AnswerCallbackQuery(cb.Id, "Некорректный Telegram ID!", showAlert: true, cancellationToken: ct);
+                    return;
+                }
+                if (_repo.ExistsByTgId(newTgId))
                 {
                     await bot.AnswerCallbackQuery(cb.Id, "Уже существует!", showAlert: true, cancellationToken: ct);
                     return;
                 }
                 var exp = DateTime.Now.AddDays(_conf.default_expire_days);
+                string newToken = LampacUser.GenerateToken();
                 _repo.AddOrReplace(new LampacUser
                 {
-                    Id      = nid, Group = 1,
+                    Id      = newToken, TgId = newTgId, Group = 1,
                     Expires = StoreExpiry(exp),
                     Comment = comment,
                     Params  = new LampacUserParams { Adult = false, Admin = false }
@@ -875,18 +885,21 @@ namespace TelegramBot.Services
                 await bot.EditMessageText(chatId, msgId,
                     "✅  <b>Пользователь добавлен</b>\n\n" +
                     "┌  <b>" + comment + "</b>\n" +
-                    "│  🆔  <code>" + nid + "</code>\n" +
+                    "│  🆔 TG:  <code>" + nid + "</code>\n" +
+                    "│  🔑  <code>" + newToken + "</code>\n" +
                     "│  📅  до  <b>" + exp.ToString("dd.MM.yyyy") + "</b>\n" +
                     "└─────────────────",
                     parseMode: ParseMode.Html,
                     replyMarkup: new InlineKeyboardMarkup(new[]
                     {
-                        new[] { InlineKeyboardButton.WithCallbackData("👤  Открыть карточку", "user:" + nid) },
+                        new[] { InlineKeyboardButton.WithCallbackData("👤  Открыть карточку", "user:" + newToken) },
                         new[] { InlineKeyboardButton.WithCallbackData("‹  К списку",          "list:0") }
                     }),
                     cancellationToken: ct);
-                if (long.TryParse(nid, out long tgId))
-                    try { await bot.SendMessage(tgId, "🎉  Вам выдан доступ к Lampa!\n📅  Действует до " + exp.ToString("dd.MM.yyyy"), replyMarkup: UserMenu, cancellationToken: ct); } catch { }
+                try { await bot.SendMessage(newTgId,
+                    "🎉  Вам выдан доступ к Lampa!\n📅  Действует до " + exp.ToString("dd.MM.yyyy") +
+                    "\n\n🔑  Ваш ID для подключения:\n<code>" + newToken + "</code>",
+                    parseMode: ParseMode.Html, replyMarkup: UserMenu, cancellationToken: ct); } catch { }
                 return;
             }
 
@@ -909,8 +922,8 @@ namespace TelegramBot.Services
                 int sent = 0, failed = 0;
                 foreach (var u in activeUsers)
                 {
-                    if (!long.TryParse(u.Id, out long uid)) continue;
-                    try   { await bot.SendMessage(uid, "📢  " + message, cancellationToken: ct); sent++; }
+                    if (u.TgId == 0) continue;
+                    try   { await bot.SendMessage(u.TgId, "📢  " + message, cancellationToken: ct); sent++; }
                     catch { failed++; }
                 }
 
@@ -933,15 +946,14 @@ namespace TelegramBot.Services
             if (data.StartsWith("approve:"))
             {
                 long uid = long.Parse(data.Substring("approve:".Length));
-                // TryGetAndRemove checks by msgId first, then falls back to userId
-                // (covers both: original notification message and pending-list view)
                 _pendingRepo.TryGetAndRemove(msgId, uid, out var req);
                 req ??= new PendingRequest { TelegramId = uid };
                 var exp     = DateTime.Now.AddDays(_conf.default_expire_days);
                 string comment = BuildComment(req);
+                string token = LampacUser.GenerateToken();
                 _repo.AddOrReplace(new LampacUser
                 {
-                    Id      = uid.ToString(), Group = 1,
+                    Id      = token, TgId = uid, Group = 1,
                     Expires = StoreExpiry(exp),
                     Comment = comment,
                     Params  = new LampacUserParams { Adult = false, Admin = false }
@@ -950,7 +962,10 @@ namespace TelegramBot.Services
                 await bot.EditMessageText(chatId, msgId,
                     "✅  <b>Одобрено</b>: " + comment + "\n📅  до " + exp.ToString("dd.MM.yyyy"),
                     parseMode: ParseMode.Html, cancellationToken: ct);
-                try { await bot.SendMessage(uid, "🎉  Доступ одобрен!\n📅  Действует до " + exp.ToString("dd.MM.yyyy"), replyMarkup: UserMenu, cancellationToken: ct); } catch { }
+                try { await bot.SendMessage(uid,
+                    "🎉  Доступ одобрен!\n📅  Действует до " + exp.ToString("dd.MM.yyyy") +
+                    "\n\n🔑  Ваш ID для подключения:\n<code>" + token + "</code>",
+                    parseMode: ParseMode.Html, replyMarkup: UserMenu, cancellationToken: ct); } catch { }
                 return;
             }
 

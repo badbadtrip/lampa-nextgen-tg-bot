@@ -74,16 +74,27 @@ namespace TelegramBot.Services
         {
             idArg = idArg.TrimStart('@');
             var users = ReadAll();
-            var u = users.FirstOrDefault(x => x.Id == idArg);
-            if (u != null) return u;
+            if (long.TryParse(idArg, out long tgId))
+            {
+                var byTg = users.FirstOrDefault(x => x.TgId == tgId);
+                if (byTg != null) return byTg;
+            }
+            var byLampacId = users.FirstOrDefault(x => x.Id == idArg);
+            if (byLampacId != null) return byLampacId;
             return users.FirstOrDefault(x =>
                 x.Comment.Contains(idArg, StringComparison.OrdinalIgnoreCase));
         }
 
-        public bool Exists(string telegramId) =>
-            ReadAll().Any(u => u.Id == telegramId);
+        public bool ExistsByTgId(long tgId) =>
+            ReadAll().Any(u => u.TgId == tgId);
 
-        public LampacUser? GetById(string telegramId) =>
-            ReadAll().FirstOrDefault(u => u.Id == telegramId);
+        public bool Exists(string lampacId) =>
+            ReadAll().Any(u => u.Id == lampacId);
+
+        public LampacUser? GetByTgId(long tgId) =>
+            ReadAll().FirstOrDefault(u => u.TgId == tgId);
+
+        public LampacUser? GetById(string lampacId) =>
+            ReadAll().FirstOrDefault(u => u.Id == lampacId);
     }
 }
