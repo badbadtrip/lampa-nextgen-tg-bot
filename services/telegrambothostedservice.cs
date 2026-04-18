@@ -6,6 +6,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Telegram.Bot;
 using Telegram.Bot.Types;
+using Telegram.Bot.Types.Enums;
 using TelegramBot.Services;
 
 namespace TelegramBot.Services
@@ -58,10 +59,12 @@ namespace TelegramBot.Services
             var dir         = Path.GetDirectoryName(Path.GetFullPath(conf.users_file_path)) ?? ".";
             var pendingPath = Path.Combine(dir, "pending.json");
             var notifPath   = Path.Combine(dir, "notifications_date.txt");
+            var auditPath   = Path.Combine(dir, "audit.log");
 
             var repo        = new UsersRepository(conf.users_file_path, _loggerFactory.CreateLogger<UsersRepository>());
             var pendingRepo = new PendingRepository(pendingPath);
-            var session     = new BotSession(conf, repo, pendingRepo, _loggerFactory.CreateLogger<BotSession>(), notifPath);
+            var auditLog    = new AuditLog(auditPath, _loggerFactory.CreateLogger<AuditLog>());
+            var session     = new BotSession(conf, repo, pendingRepo, auditLog, _loggerFactory.CreateLogger<BotSession>(), notifPath);
             var bot         = new TelegramBotClient(conf.bot_token.Trim());
 
             try
@@ -82,6 +85,19 @@ namespace TelegramBot.Services
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "[TelegramBot] DeleteWebhook warning");
+            }
+
+            try
+            {
+                await bot.SetMyCommands(new[]
+                {
+                    new Telegram.Bot.Types.BotCommand { Command = "start", Description = "Главное меню" },
+                    new Telegram.Bot.Types.BotCommand { Command = "help",  Description = "Помощь" }
+                }, cancellationToken: ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[TelegramBot] SetMyCommands warning");
             }
 
             _logger.LogInformation("[TelegramBot] Long polling запущен (limit={Limit}, timeout={Timeout}s).",

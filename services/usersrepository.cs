@@ -65,9 +65,16 @@ namespace TelegramBot.Services
         public void AddOrReplace(LampacUser user)
         {
             var users = ReadAll();
-            users.RemoveAll(u => u.Id == user.Id);
+            users.RemoveAll(u => u.TgId == user.TgId);
             users.Add(user);
             WriteAll(users);
+        }
+
+        public void RemoveById(string lampacId)
+        {
+            var users = ReadAll();
+            if (users.RemoveAll(u => u.Id == lampacId) > 0)
+                WriteAll(users);
         }
 
         public LampacUser? Find(string idArg)
