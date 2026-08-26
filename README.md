@@ -87,6 +87,44 @@ mods/
         └── telegram.bot.dll
 ```
 
+<details>
+<summary><b>Скрипт установки/обновления для Linux</b></summary>
+
+<br>
+
+Клонирует репозиторий во временную папку, копирует только нужные файлы модуля и перезапускает сервис:
+
+```bash
+LAMPAC_DIR="/opt/lampac"     # ← поменяй под свой путь
+TMP_DIR=$(mktemp -d)
+
+git clone --depth 1 https://github.com/badbadtrip/lampa-nextgen-tg-bot.git "$TMP_DIR"
+
+mkdir -p "$LAMPAC_DIR/mods/TelegramBot"
+rsync -a --delete \
+  --exclude='.git' \
+  --exclude='README.md' \
+  --exclude='LICENSE' \
+  --exclude='CLAUDE.md' \
+  --exclude='TelegramBot.csproj' \
+  --exclude='screenshots' \
+  "$TMP_DIR"/ "$LAMPAC_DIR/mods/TelegramBot/"
+
+rm -rf "$TMP_DIR"
+
+sudo systemctl restart lampac
+journalctl -u lampac -f
+```
+
+> [!TIP]
+> Если команды выполняются через `sudo`/из-под `root`, а сам `lampac.service` крутится под отдельным пользователем — сервис не сможет прочитать только что скопированные файлы (`UnauthorizedAccessException` в логе). Проверь и поправь владельца при необходимости:
+> ```bash
+> systemctl show lampac -p User --value      # под кем реально работает сервис
+> chown -R <user>:<user> "$LAMPAC_DIR/mods/TelegramBot"
+> ```
+
+</details>
+
 **2.** Заполните секцию `TelegramBot` в `init.conf` (см. [Конфигурация](#конфигурация)) и перезапустите сервер.
 
 > [!WARNING]
