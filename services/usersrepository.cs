@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -62,19 +63,120 @@ namespace TelegramBot.Services
             }
         }
 
+        /// <summary>
+        /// Runs a read-modify-write cycle under a single lock, so concurrent callers
+        /// (admin actions, self-service token regen, the hourly notification pass)
+        /// can't interleave and clobber each other's writes.
+        /// </summary>
+        public void Mutate(Action<List<LampacUser>> action)
+        {
+            lock (_lock)
+            {
+                var users = ReadAll();
+                action(users);
+                WriteAll(users);
+            }
+        }
+
         public void AddOrReplace(LampacUser user)
         {
-            var users = ReadAll();
-            users.RemoveAll(u => u.TgId == user.TgId);
-            users.Add(user);
-            WriteAll(users);
+            Mutate(list =>
+            {
+                list.RemoveAll(u => u.TgId == user.TgId);
+                list.Add(user);
+            });
         }
 
         public void RemoveById(string lampacId)
         {
-            var users = ReadAll();
-            if (users.RemoveAll(u => u.Id == lampacId) > 0)
-                WriteAll(users);
+            Mutate(list => list.RemoveAll(u => u.Id == lampacId));
+        }
+
+        public LampacUser? SetExpiry(string lampacId, string expiresIso)
+        {
+            LampacUser? updated = null;
+            Mutate(list =>
+            {
+                var u = list.FirstOrDefault(x => x.Id == lampacId);
+                if (u == null) return;
+                u.Expires = expiresIso;
+                updated = u;
+            });
+            return updated;
+        }
+
+        public LampacUser? UpdateParams(string lampacId, Action<LampacUserParams> mutate)
+        {
+            LampacUser? updated = null;
+            Mutate(list =>
+            {
+                var u = list.FirstOrDefault(x => x.Id == lampacId);
+                if (u == null) return;
+                mutate(u.Params);
+                updated = u;
+            });
+            return updated;
+        }
+
+        /// <summary>
+        /// Bulk-extends every user matching the predicate to the same expiry, returning how many were touched.
+        /// </summary>
+        public int ExtendWhere(Func<LampacUser, bool> predicate, string expiresIso)
+        {
+            int affected = 0;
+            Mutate(list =>
+            {
+                foreach (var u in list)
+                {
+                    if (!predicate(u)) continue;
+                    u.Expires = expiresIso;
+                    affected++;
+                }
+            });
+            return affected;
+        }
+
+        public LampacUser? Remove(string lampacId)
+        {
+            LampacUser? removed = null;
+            Mutate(list =>
+            {
+                removed = list.FirstOrDefault(u => u.Id == lampacId);
+                if (removed != null) list.Remove(removed);
+            });
+            return removed;
+        }
+
+        /// <summary>
+        /// Atomically swaps a user's Lampac connection id for a fresh, collision-checked one.
+        /// </summary>
+        public LampacUser? RegenerateToken(long tgId, out string oldId)
+        {
+            string captured = "";
+            LampacUser? updated = null;
+            Mutate(list =>
+            {
+                var u = list.FirstOrDefault(x => x.TgId == tgId);
+                if (u == null) return;
+                captured = u.Id;
+                string newTok;
+                do { newTok = LampacUser.GenerateToken(); } while (list.Any(x => x.Id == newTok));
+                u.Id = newTok;
+                updated = u;
+            });
+            oldId = captured;
+            return updated;
+        }
+
+        public string GenerateUniqueToken()
+        {
+            lock (_lock)
+            {
+                var existing = ReadAll();
+                string tok;
+                do { tok = LampacUser.GenerateToken(); } while (existing.Any(u => u.Id == tok));
+                return tok;
+            }
         }
 
         public LampacUser? Find(string idArg)

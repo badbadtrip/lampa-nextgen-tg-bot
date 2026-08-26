@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -34,7 +35,8 @@ namespace TelegramBot.Services
         static readonly ReplyKeyboardMarkup AdminMenu = new(new[]
         {
             new KeyboardButton[] { "👥  Пользователи", "➕  Добавить",  "📊  Статистика" },
-            new KeyboardButton[] { "🔍  Найти",         "📢  Рассылка",  "📋  Заявки"     }
+            new KeyboardButton[] { "🔍  Найти",         "📢  Рассылка",  "📥  Заявки"     },
+            new KeyboardButton[] { "🔁  Продлить всех", "🧾  Аудит" }
         })
         { ResizeKeyboard = true };
 
@@ -49,9 +51,11 @@ namespace TelegramBot.Services
         const string BTN_STATS     = "📊  Статистика";
         const string BTN_FIND      = "🔍  Найти";
         const string BTN_BROADCAST = "📢  Рассылка";
-        const string BTN_PENDING   = "📋  Заявки";
-        const string BTN_PROFILE   = "📋  Мой профиль";
-        const string BTN_SUPPORT   = "🆘  Поддержка";
+        const string BTN_PENDING     = "📥  Заявки";
+        const string BTN_BULK_EXTEND = "🔁  Продлить всех";
+        const string BTN_AUDIT       = "🧾  Аудит";
+        const string BTN_PROFILE     = "📋  Мой профиль";
+        const string BTN_SUPPORT     = "🆘  Поддержка";
 
         public BotSession(TelegramBotConf conf, UsersRepository repo, PendingRepository pendingRepo,
                           AuditLog auditLog, ILogger<BotSession> logger, string notifPath)
@@ -73,6 +77,11 @@ namespace TelegramBot.Services
 
         static string StoreExpiry(DateTime dt) =>
             dt.ToString("yyyy-MM-ddT00:00:00+03:00");
+
+        // Telegram profile fields (FirstName/Username) and anything derived from them
+        // (Comment, support messages) are attacker-controlled — must be encoded before
+        // going into a ParseMode.Html message, or a crafted name breaks/hijacks rendering.
+        static string H(string s) => System.Net.WebUtility.HtmlEncode(s ?? "");
 
         public async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken ct)
         {
@@ -151,12 +160,14 @@ namespace TelegramBot.Services
             var state = GetState(userId);
             if (state != null) { await HandleAdminInputAsync(bot, msg.Chat.Id, userId, state, text, ct); return; }
 
-            if (text == BTN_USERS)     { await ShowUserListAsync(bot, msg.Chat.Id, 0, ct); return; }
-            if (text == BTN_STATS)     { await ShowStatsAsync(bot, msg.Chat.Id, ct); return; }
-            if (text == BTN_ADD)       { await StartAddUserAsync(bot, msg.Chat.Id, userId, ct); return; }
-            if (text == BTN_FIND)      { await StartFindAsync(bot, msg.Chat.Id, userId, ct); return; }
-            if (text == BTN_BROADCAST) { await StartBroadcastAsync(bot, msg.Chat.Id, userId, ct); return; }
-            if (text == BTN_PENDING)   { await ShowPendingListAsync(bot, msg.Chat.Id, ct); return; }
+            if (text == BTN_USERS)       { await ShowUserListAsync(bot, msg.Chat.Id, "all", 0, ct); return; }
+            if (text == BTN_STATS)       { await ShowStatsAsync(bot, msg.Chat.Id, ct); return; }
+            if (text == BTN_ADD)         { await StartAddUserAsync(bot, msg.Chat.Id, userId, ct); return; }
+            if (text == BTN_FIND)        { await StartFindAsync(bot, msg.Chat.Id, userId, ct); return; }
+            if (text == BTN_BROADCAST)   { await StartBroadcastAsync(bot, msg.Chat.Id, userId, ct); return; }
+            if (text == BTN_PENDING)     { await ShowPendingListAsync(bot, msg.Chat.Id, ct); return; }
+            if (text == BTN_BULK_EXTEND) { await StartBulkExtendAsync(bot, msg.Chat.Id, ct); return; }
+            if (text == BTN_AUDIT)       { await ShowAuditAsync(bot, msg.Chat.Id, ct); return; }
 
             await bot.SendMessage(msg.Chat.Id, "Выберите действие:", replyMarkup: AdminMenu, cancellationToken: ct);
         }
@@ -224,7 +235,7 @@ namespace TelegramBot.Services
                 new[] { InlineKeyboardButton.WithCallbackData("🚀  Запросить доступ", "req:" + userId) }
             });
             await bot.SendMessage(msg.Chat.Id,
-                "👋  Привет, " + firstName + "!\n\n" +
+                "👋  Привет, " + H(firstName) + "!\n\n" +
                 "<b>Lampa</b> — медиаплеер с открытым исходным кодом для просмотра фильмов и сериалов онлайн.\n\n" +
                 "Нажмите кнопку, чтобы запросить доступ к сервису.",
                 parseMode: ParseMode.Html,
@@ -240,8 +251,10 @@ namespace TelegramBot.Services
                   "📊  <b>Статистика</b> — сводка по активным / истёкшим\n" +
                   "🔍  <b>Найти</b> — поиск по ID, @username или имени\n" +
                   "📢  <b>Рассылка</b> — отправить сообщение всем активным\n" +
-                  "📋  <b>Заявки</b> — необработанные запросы доступа\n\n" +
-                  "/start — главное меню"
+                  "📥  <b>Заявки</b> — необработанные запросы доступа\n" +
+                  "🔁  <b>Продлить всех</b> — массовое продление активных\n" +
+                  "🧾  <b>Аудит</b> — последние действия из журнала\n\n" +
+                  "/start — главное меню\n/cancel — отменить текущее действие"
                 : "ℹ️  <b>Помощь</b>\n\n" +
                   "📋  <b>Мой профиль</b> — статус доступа и ID для подключения\n" +
                   "🆘  <b>Поддержка</b> — написать администратору\n\n" +
@@ -278,7 +291,7 @@ namespace TelegramBot.Services
             });
             await bot.SendMessage(msg.Chat.Id,
                 "📋  <b>Мой профиль</b>\n\n" +
-                "┌  <b>" + user.Comment + "</b>\n" +
+                "┌  <b>" + H(user.Comment) + "</b>\n" +
                 "│  📅  до  <b>" + exp.ToString("dd.MM.yyyy") + "</b>\n" +
                 "│  " + (active ? "✅  Активен · " + days + " дн." : "❌  Истёк") + "\n" +
                 "│\n" +
@@ -306,11 +319,11 @@ namespace TelegramBot.Services
             string username  = msg.From?.Username  ?? "";
 
             string who = string.IsNullOrEmpty(username)
-                ? firstName + "  (ID: " + userId + ")"
-                : "@" + username + "  /  " + firstName + "  (ID: " + userId + ")";
+                ? H(firstName) + "  (ID: " + userId + ")"
+                : "@" + H(username) + "  /  " + H(firstName) + "  (ID: " + userId + ")";
 
             await bot.SendMessage(_conf.admin_id,
-                "🆘  <b>Запрос поддержки</b>\n\n👤  " + who + "\n\n💬  " + text,
+                "🆘  <b>Запрос поддержки</b>\n\n👤  " + who + "\n\n💬  " + H(text),
                 parseMode: ParseMode.Html,
                 replyMarkup: new InlineKeyboardMarkup(new[]
                 {
@@ -348,25 +361,59 @@ namespace TelegramBot.Services
                 parseMode: ParseMode.Html, replyMarkup: AdminMenu, cancellationToken: ct);
         }
 
+        async Task StartBulkExtendAsync(ITelegramBotClient bot, long chatId, CancellationToken ct)
+        {
+            int active = _repo.ReadAll().Count(u => ParseExpiry(u.Expires) >= DateTime.UtcNow);
+            var kb = new InlineKeyboardMarkup(new[]
+            {
+                new[]
+                {
+                    InlineKeyboardButton.WithCallbackData("+30 дн.",  "bulkext:30"),
+                    InlineKeyboardButton.WithCallbackData("+90 дн.",  "bulkext:90"),
+                    InlineKeyboardButton.WithCallbackData("+365 дн.", "bulkext:365")
+                }
+            });
+            await bot.SendMessage(chatId,
+                "🔁  <b>Продлить всех активных</b>\n\nЗатронет пользователей: <b>" + active + "</b>\n\nВыберите срок:",
+                parseMode: ParseMode.Html, replyMarkup: kb, cancellationToken: ct);
+        }
+
+        async Task ShowAuditAsync(ITelegramBotClient bot, long chatId, CancellationToken ct)
+        {
+            const int maxLines = 20;
+            var lines = _auditLog.ReadLast(maxLines);
+            if (lines.Count == 0)
+            {
+                await bot.SendMessage(chatId, "🧾  Журнал пуст.", replyMarkup: AdminMenu, cancellationToken: ct);
+                return;
+            }
+
+            lines.Reverse();
+            string body = string.Join("\n", lines.Select(H));
+            await bot.SendMessage(chatId,
+                "🧾  <b>Последние действия (" + lines.Count + ")</b>\n\n<pre>" + body + "</pre>",
+                parseMode: ParseMode.Html, replyMarkup: AdminMenu, cancellationToken: ct);
+        }
+
         async Task ShowPendingListAsync(ITelegramBotClient bot, long chatId, CancellationToken ct)
         {
             var all = _pendingRepo.GetAll();
             if (all.Count == 0)
             {
-                await bot.SendMessage(chatId, "📋  Нет активных заявок.", replyMarkup: AdminMenu, cancellationToken: ct);
+                await bot.SendMessage(chatId, "📥  Нет активных заявок.", replyMarkup: AdminMenu, cancellationToken: ct);
                 return;
             }
 
             var sb   = new StringBuilder();
             var rows = new List<InlineKeyboardButton[]>();
-            sb.AppendLine("📋  <b>Активные заявки (" + all.Count + ")</b>\n");
+            sb.AppendLine("📥  <b>Активные заявки (" + all.Count + ")</b>\n");
 
             foreach (var (_, req) in all)
             {
                 string displayName = string.IsNullOrEmpty(req.Username) ? req.FirstName : "@" + req.Username;
                 string who = string.IsNullOrEmpty(req.Username)
-                    ? req.FirstName + "  (ID: " + req.TelegramId + ")"
-                    : "@" + req.Username + "  /  " + req.FirstName;
+                    ? H(req.FirstName) + "  (ID: " + req.TelegramId + ")"
+                    : "@" + H(req.Username) + "  /  " + H(req.FirstName);
                 sb.AppendLine("·  " + who + "  —  " + req.CreatedAt.ToLocalTime().ToString("dd.MM HH:mm"));
                 string label = displayName.Length > 20 ? displayName.Substring(0, 17) + "…" : displayName;
                 rows.Add(new[]
@@ -386,15 +433,18 @@ namespace TelegramBot.Services
         {
             if (input == "/cancel" ||
                 input == BTN_USERS || input == BTN_ADD  || input == BTN_STATS ||
-                input == BTN_FIND  || input == BTN_BROADCAST || input == BTN_PENDING)
+                input == BTN_FIND  || input == BTN_BROADCAST || input == BTN_PENDING ||
+                input == BTN_BULK_EXTEND || input == BTN_AUDIT)
             {
                 ClearState(userId);
-                if (input == BTN_USERS)     { await ShowUserListAsync(bot, chatId, 0, ct); return; }
-                if (input == BTN_STATS)     { await ShowStatsAsync(bot, chatId, ct); return; }
-                if (input == BTN_ADD)       { await StartAddUserAsync(bot, chatId, userId, ct); return; }
-                if (input == BTN_FIND)      { await StartFindAsync(bot, chatId, userId, ct); return; }
-                if (input == BTN_BROADCAST) { await StartBroadcastAsync(bot, chatId, userId, ct); return; }
-                if (input == BTN_PENDING)   { await ShowPendingListAsync(bot, chatId, ct); return; }
+                if (input == BTN_USERS)       { await ShowUserListAsync(bot, chatId, "all", 0, ct); return; }
+                if (input == BTN_STATS)       { await ShowStatsAsync(bot, chatId, ct); return; }
+                if (input == BTN_ADD)         { await StartAddUserAsync(bot, chatId, userId, ct); return; }
+                if (input == BTN_FIND)        { await StartFindAsync(bot, chatId, userId, ct); return; }
+                if (input == BTN_BROADCAST)   { await StartBroadcastAsync(bot, chatId, userId, ct); return; }
+                if (input == BTN_PENDING)     { await ShowPendingListAsync(bot, chatId, ct); return; }
+                if (input == BTN_BULK_EXTEND) { await StartBulkExtendAsync(bot, chatId, ct); return; }
+                if (input == BTN_AUDIT)       { await ShowAuditAsync(bot, chatId, ct); return; }
                 await bot.SendMessage(chatId, "↩️  Отменено.", replyMarkup: AdminMenu, cancellationToken: ct);
                 return;
             }
@@ -447,14 +497,14 @@ namespace TelegramBot.Services
             // ── Add user ─────────────────────────────────────────────
             if (state == "add_id")
             {
-                if (!long.TryParse(input, out _))
+                if (!long.TryParse(input, out long newTgId))
                 {
                     await bot.SendMessage(chatId,
                         "⚠️  Telegram ID — это число.\nПопробуйте ещё раз или /cancel",
                         replyMarkup: AdminMenu, cancellationToken: ct);
                     return;
                 }
-                if (_repo.Exists(input))
+                if (_repo.ExistsByTgId(newTgId))
                 {
                     await bot.SendMessage(chatId,
                         "⚠️  Пользователь <code>" + input + "</code> уже существует.\nВведите другой ID или /cancel",
@@ -531,15 +581,12 @@ namespace TelegramBot.Services
                     return;
                 }
                 ClearState(userId);
-                var users = _repo.ReadAll();
-                var idx = users.FindIndex(u => u.Id == targetId);
-                if (idx < 0)
+                var updated = _repo.SetExpiry(targetId, StoreExpiry(newDate));
+                if (updated == null)
                 {
                     await bot.SendMessage(chatId, "❌  Пользователь не найден.", replyMarkup: AdminMenu, cancellationToken: ct);
                     return;
                 }
-                users[idx].Expires = StoreExpiry(newDate);
-                _repo.WriteAll(users);
                 await bot.SendMessage(chatId,
                     "✅  Дата обновлена → <b>" + newDate.ToString("dd.MM.yyyy") + "</b>",
                     parseMode: ParseMode.Html, replyMarkup: AdminMenu, cancellationToken: ct);
@@ -551,19 +598,42 @@ namespace TelegramBot.Services
 
         #region User list
 
-        async Task ShowUserListAsync(ITelegramBotClient bot, long chatId, int page, CancellationToken ct)
+        async Task ShowUserListAsync(ITelegramBotClient bot, long chatId, string filter, int page, CancellationToken ct)
         {
             const int pageSize = 5;
-            var users = _repo.ReadAll();
-            if (users.Count == 0)
+            var all = _repo.ReadAll();
+            if (all.Count == 0)
             {
                 await bot.SendMessage(chatId, "📭  Список пуст.", replyMarkup: AdminMenu, cancellationToken: ct);
                 return;
             }
 
+            List<LampacUser> users = filter switch
+            {
+                "active"  => all.Where(u => ParseExpiry(u.Expires) >= DateTime.UtcNow).ToList(),
+                "expired" => all.Where(u => ParseExpiry(u.Expires) <  DateTime.UtcNow).ToList(),
+                _         => all
+            };
+
+            var rows = new List<InlineKeyboardButton[]>
+            {
+                new[]
+                {
+                    InlineKeyboardButton.WithCallbackData(filter == "all"     ? "▪️ Все"      : "Все",       "list:all:0"),
+                    InlineKeyboardButton.WithCallbackData(filter == "active"  ? "▪️ Активные" : "Активные",  "list:active:0"),
+                    InlineKeyboardButton.WithCallbackData(filter == "expired" ? "▪️ Истёкшие" : "Истёкшие",  "list:expired:0")
+                }
+            };
+
+            if (users.Count == 0)
+            {
+                await bot.SendMessage(chatId, "📭  По фильтру ничего нет.",
+                    replyMarkup: new InlineKeyboardMarkup(rows), cancellationToken: ct);
+                return;
+            }
+
             var paged      = users.Skip(page * pageSize).Take(pageSize).ToList();
             int totalPages = (int)Math.Ceiling(users.Count / (double)pageSize);
-            var rows       = new List<InlineKeyboardButton[]>();
 
             foreach (var u in paged)
             {
@@ -577,16 +647,16 @@ namespace TelegramBot.Services
             if (totalPages > 1)
             {
                 var nav = new List<InlineKeyboardButton>();
-                if (page > 0)               nav.Add(InlineKeyboardButton.WithCallbackData("◀", "list:" + (page - 1)));
+                if (page > 0)               nav.Add(InlineKeyboardButton.WithCallbackData("◀", "list:" + filter + ":" + (page - 1)));
                 nav.Add(InlineKeyboardButton.WithCallbackData((page + 1) + " / " + totalPages, "noop"));
-                if (page < totalPages - 1)  nav.Add(InlineKeyboardButton.WithCallbackData("▶", "list:" + (page + 1)));
+                if (page < totalPages - 1)  nav.Add(InlineKeyboardButton.WithCallbackData("▶", "list:" + filter + ":" + (page + 1)));
                 rows.Add(nav.ToArray());
             }
 
-            int activeCount = users.Count(u => ParseExpiry(u.Expires) >= DateTime.UtcNow);
+            int activeCount = all.Count(u => ParseExpiry(u.Expires) >= DateTime.UtcNow);
             await bot.SendMessage(chatId,
-                "👥  <b>Пользователи</b>\n<i>Всего: " + users.Count + "  ·  Активных: " + activeCount +
-                "  ·  Истёкших: " + (users.Count - activeCount) + "</i>",
+                "👥  <b>Пользователи</b>\n<i>Всего: " + all.Count + "  ·  Активных: " + activeCount +
+                "  ·  Истёкших: " + (all.Count - activeCount) + "</i>",
                 parseMode: ParseMode.Html,
                 replyMarkup: new InlineKeyboardMarkup(rows),
                 cancellationToken: ct);
@@ -616,10 +686,15 @@ namespace TelegramBot.Services
             bool active  = exp >= DateTime.UtcNow;
             int daysLeft = (int)(exp - DateTime.UtcNow).TotalDays;
             string status = active ? "✅  Активен · " + daysLeft + " дн." : "❌  Истёк";
-            string tgLine = u.TgId != 0 ? "│  👤 TG:  <code>" + u.TgId + "</code>\n" : "";
+            string tgLine = u.TgId != 0 ? "│  👤  TG:  <code>" + u.TgId + "</code>\n" : "";
+            var flagTags = new List<string>();
+            if (u.Params.Adult) flagTags.Add("🔞  18+");
+            if (u.Params.Admin) flagTags.Add("👑  Lampac-админ");
+            string flagsLine = flagTags.Count > 0 ? "│  " + string.Join("   ", flagTags) + "\n" : "";
             return
-                "┌  <b>" + u.Comment + "</b>\n" +
+                "┌  <b>" + H(u.Comment) + "</b>\n" +
                 tgLine +
+                flagsLine +
                 "│  🔑  <code>" + u.Id + "</code>\n" +
                 "│  📅  до  <b>" + exp.ToString("dd.MM.yyyy") + "</b>\n" +
                 "│  " + status + "\n" +
@@ -632,14 +707,19 @@ namespace TelegramBot.Services
             bool active = exp >= DateTime.UtcNow;
             var rows   = new List<InlineKeyboardButton[]>();
             rows.Add(active
-                ? new[] { InlineKeyboardButton.WithCallbackData("❌  Заблокировать",  "block:"   + u.Id) }
-                : new[] { InlineKeyboardButton.WithCallbackData("✅  Разблокировать", "unblock:" + u.Id) });
+                ? new[] { InlineKeyboardButton.WithCallbackData("🔒  Заблокировать",  "block:"   + u.Id) }
+                : new[] { InlineKeyboardButton.WithCallbackData("🔓  Разблокировать", "unblock:" + u.Id) });
             rows.Add(new[]
             {
                 InlineKeyboardButton.WithCallbackData("📅  Продлить", "setexpire:" + u.Id),
                 InlineKeyboardButton.WithCallbackData("🗑  Удалить",  "del:"       + u.Id)
             });
-            rows.Add(new[] { InlineKeyboardButton.WithCallbackData("‹  Назад", "list:0") });
+            rows.Add(new[]
+            {
+                InlineKeyboardButton.WithCallbackData(u.Params.Adult ? "🔞  18+: Вкл"            : "🔞  18+: Выкл",            "toggle_adult:" + u.Id),
+                InlineKeyboardButton.WithCallbackData(u.Params.Admin ? "👑  Lampac-админ: Вкл"    : "👑  Lampac-админ: Выкл",   "toggle_admin:" + u.Id)
+            });
+            rows.Add(new[] { InlineKeyboardButton.WithCallbackData("‹  Назад", "list:all:0") });
             return new InlineKeyboardMarkup(rows);
         }
 
@@ -663,7 +743,7 @@ namespace TelegramBot.Services
             sb.AppendLine("👥  Всего: <b>" + total + "</b>");
             sb.AppendLine("✅  Активных: <b>" + active + "</b>");
             sb.AppendLine("❌  Истёкших: <b>" + (total - active) + "</b>");
-            sb.AppendLine("📋  Заявок в очереди: <b>" + _pendingRepo.Count + "</b>");
+            sb.AppendLine("📥  Заявок в очереди: <b>" + _pendingRepo.Count + "</b>");
 
             if (expiring.Count > 0)
             {
@@ -672,7 +752,7 @@ namespace TelegramBot.Services
                 {
                     var exp  = ParseExpiry(u.Expires);
                     int days = (int)(exp - DateTime.UtcNow).TotalDays;
-                    sb.AppendLine("·  " + u.Comment + "  —  " + days + " дн.");
+                    sb.AppendLine("·  " + H(u.Comment) + "  —  " + days + " дн.");
                 }
             }
 
@@ -701,7 +781,7 @@ namespace TelegramBot.Services
             var users = _repo.ReadAll();
             var expiringSoon = users
                 .Select(u => (User: u, Exp: ParseExpiry(u.Expires)))
-                .Where(x => x.Exp > DateTime.UtcNow && x.Exp <= DateTime.UtcNow.AddDays(7))
+                .Where(x => x.Exp > DateTime.UtcNow && x.Exp <= DateTime.UtcNow.AddDays(_conf.notify_before_days))
                 .OrderBy(x => x.Exp)
                 .ToList();
 
@@ -730,11 +810,11 @@ namespace TelegramBot.Services
             }
 
             var sbAdmin = new StringBuilder();
-            sbAdmin.AppendLine("⏰  <b>Истекают в течение 7 дней</b>\n");
+            sbAdmin.AppendLine("⏰  <b>Истекают в течение " + _conf.notify_before_days + " дней</b>\n");
             foreach (var (user, exp) in expiringSoon)
             {
                 int days = Math.Max(1, (int)(exp - DateTime.UtcNow).TotalDays);
-                sbAdmin.AppendLine("·  " + user.Comment + "  —  " + days + " дн.  (" + exp.ToString("dd.MM.yyyy") + ")");
+                sbAdmin.AppendLine("·  " + H(user.Comment) + "  —  " + days + " дн.  (" + exp.ToString("dd.MM.yyyy") + ")");
             }
             try
             {
@@ -796,8 +876,8 @@ namespace TelegramBot.Services
                 };
                 bool isRenewal = existingUser != null;
                 string who = string.IsNullOrEmpty(req.Username)
-                    ? req.FirstName + "  (ID: " + rid + ")"
-                    : "@" + req.Username + "  /  " + req.FirstName + "  (ID: " + rid + ")";
+                    ? H(req.FirstName) + "  (ID: " + rid + ")"
+                    : "@" + H(req.Username) + "  /  " + H(req.FirstName) + "  (ID: " + rid + ")";
 
                 string adminText = isRenewal
                     ? "🔄  <b>Запрос на продление</b>\n\n👤  " + who + "\n🕐  " + DateTime.Now.ToString("dd.MM.yyyy  HH:mm")
@@ -822,14 +902,9 @@ namespace TelegramBot.Services
             // ── Token regeneration (user action) ─────────────────────
             if (data == "regen_token")
             {
-                var userRecord = _repo.GetByTgId(callerId);
-                if (userRecord == null) { await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct); return; }
-                string newTok = LampacUser.GenerateToken();
-                string oldTok = userRecord.Id;
-                userRecord.Id = newTok;
-                _repo.AddOrReplace(userRecord);
-                _repo.RemoveById(oldTok);
-                _auditLog.Write("regen_token", callerId, userRecord.Comment, "old=" + oldTok + " new=" + newTok);
+                var updated = _repo.RegenerateToken(callerId, out string oldTok);
+                if (updated == null) { await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct); return; }
+                _auditLog.Write("regen_token", callerId, updated.Comment, "old=" + oldTok + " new=" + updated.Id);
                 await bot.AnswerCallbackQuery(cb.Id, "✅  ID обновлён", cancellationToken: ct);
                 var regenKb = new InlineKeyboardMarkup(new[]
                 {
@@ -837,11 +912,11 @@ namespace TelegramBot.Services
                 });
                 await bot.EditMessageText(chatId, msgId,
                     "📋  <b>Мой профиль</b>\n\n" +
-                    "┌  <b>" + userRecord.Comment + "</b>\n" +
-                    "│  📅  до  <b>" + ParseExpiry(userRecord.Expires).ToString("dd.MM.yyyy") + "</b>\n" +
+                    "┌  <b>" + H(updated.Comment) + "</b>\n" +
+                    "│  📅  до  <b>" + ParseExpiry(updated.Expires).ToString("dd.MM.yyyy") + "</b>\n" +
                     "│\n" +
                     "│  🔑  <b>Новый ID для подключения:</b>\n" +
-                    "│  <code>" + newTok + "</code>\n" +
+                    "│  <code>" + updated.Id + "</code>\n" +
                     "└─────────────────",
                     parseMode: ParseMode.Html,
                     replyMarkup: regenKb, cancellationToken: ct);
@@ -859,10 +934,11 @@ namespace TelegramBot.Services
 
             if (data.StartsWith("list:"))
             {
-                if (!int.TryParse(data.Substring(5), out int pg)) { await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct); return; }
+                var listParts = data.Substring(5).Split(':');
+                if (listParts.Length != 2 || !int.TryParse(listParts[1], out int pg)) { await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct); return; }
                 await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
                 try { await bot.DeleteMessage(chatId, msgId, cancellationToken: ct); } catch { }
-                await ShowUserListAsync(bot, chatId, pg, ct);
+                await ShowUserListAsync(bot, chatId, listParts[0], pg, ct);
                 return;
             }
 
@@ -878,8 +954,8 @@ namespace TelegramBot.Services
             if (data.StartsWith("block:"))
             {
                 string uid = data.Substring(6);
-                var ul = _repo.ReadAll(); var i = ul.FindIndex(u => u.Id == uid);
-                if (i >= 0) { ul[i].Expires = StoreExpiry(DateTime.Now.AddYears(-1)); _repo.WriteAll(ul); _auditLog.Write("block", ul[i].TgId, ul[i].Comment); }
+                var user = _repo.SetExpiry(uid, StoreExpiry(DateTime.Now.AddYears(-1)));
+                if (user != null) _auditLog.Write("block", user.TgId, user.Comment);
                 await bot.AnswerCallbackQuery(cb.Id, "🔒  Заблокирован", cancellationToken: ct);
                 await UpdateCardAsync(bot, chatId, msgId, uid, ct);
                 return;
@@ -888,8 +964,8 @@ namespace TelegramBot.Services
             if (data.StartsWith("unblock:"))
             {
                 string uid = data.Substring(8);
-                var ul = _repo.ReadAll(); var i = ul.FindIndex(u => u.Id == uid);
-                if (i >= 0) { ul[i].Expires = StoreExpiry(DateTime.Now.AddDays(_conf.default_expire_days)); _repo.WriteAll(ul); _auditLog.Write("unblock", ul[i].TgId, ul[i].Comment); }
+                var user = _repo.SetExpiry(uid, StoreExpiry(DateTime.Now.AddDays(_conf.default_expire_days)));
+                if (user != null) _auditLog.Write("unblock", user.TgId, user.Comment);
                 await bot.AnswerCallbackQuery(cb.Id, "🔓  Разблокирован", cancellationToken: ct);
                 await UpdateCardAsync(bot, chatId, msgId, uid, ct);
                 return;
@@ -898,11 +974,97 @@ namespace TelegramBot.Services
             if (data.StartsWith("setexpire:"))
             {
                 string uid = data.Substring("setexpire:".Length);
+                await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
+                var presetKb = new InlineKeyboardMarkup(new[]
+                {
+                    new[]
+                    {
+                        InlineKeyboardButton.WithCallbackData("+30 дн.",  "extend:30:"  + uid),
+                        InlineKeyboardButton.WithCallbackData("+90 дн.",  "extend:90:"  + uid),
+                        InlineKeyboardButton.WithCallbackData("+365 дн.", "extend:365:" + uid)
+                    },
+                    new[] { InlineKeyboardButton.WithCallbackData("📅  Другая дата", "extend_custom:" + uid) }
+                });
+                await bot.SendMessage(chatId, "📅  На сколько продлить?",
+                    replyMarkup: presetKb, cancellationToken: ct);
+                return;
+            }
+
+            if (data.StartsWith("extend_custom:"))
+            {
+                string uid = data.Substring("extend_custom:".Length);
                 SetState(callerId, "setexpire_date:" + uid);
                 await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
                 await bot.SendMessage(chatId,
                     "📅  Введите новую дату\nФормат: <b>ГГГГ-ММ-ДД</b>  (например: 2027-01-01)\n\n/cancel — отмена",
                     parseMode: ParseMode.Html, replyMarkup: AdminMenu, cancellationToken: ct);
+                return;
+            }
+
+            if (data.StartsWith("extend:"))
+            {
+                var extParts = data.Substring("extend:".Length).Split(':', 2);
+                if (extParts.Length != 2 || !int.TryParse(extParts[0], out int extDays))
+                {
+                    await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
+                    return;
+                }
+                string uid = extParts[1];
+                var updated = _repo.SetExpiry(uid, StoreExpiry(DateTime.Now.AddDays(extDays)));
+                if (updated == null)
+                {
+                    await bot.AnswerCallbackQuery(cb.Id, "Не найден.", showAlert: true, cancellationToken: ct);
+                    return;
+                }
+                _auditLog.Write("extend", updated.TgId, updated.Comment, "+" + extDays + "d");
+                await bot.AnswerCallbackQuery(cb.Id, "✅  Продлено на " + extDays + " дн.", cancellationToken: ct);
+                await bot.EditMessageText(chatId, msgId,
+                    "✅  Продлено на <b>" + extDays + "</b> дн. → до <b>" + ParseExpiry(updated.Expires).ToString("dd.MM.yyyy") + "</b>",
+                    parseMode: ParseMode.Html,
+                    replyMarkup: new InlineKeyboardMarkup(new[]
+                    {
+                        new[] { InlineKeyboardButton.WithCallbackData("👤  Открыть карточку", "user:" + uid) }
+                    }),
+                    cancellationToken: ct);
+                return;
+            }
+
+            if (data.StartsWith("toggle_adult:"))
+            {
+                string uid = data.Substring("toggle_adult:".Length);
+                var updated = _repo.UpdateParams(uid, p => p.Adult = !p.Adult);
+                if (updated == null) { await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct); return; }
+                _auditLog.Write("toggle_adult", updated.TgId, updated.Comment, "adult=" + updated.Params.Adult);
+                await bot.AnswerCallbackQuery(cb.Id, updated.Params.Adult ? "🔞  18+ включено" : "🔞  18+ выключено", cancellationToken: ct);
+                await UpdateCardAsync(bot, chatId, msgId, uid, ct);
+                return;
+            }
+
+            if (data.StartsWith("toggle_admin:"))
+            {
+                string uid = data.Substring("toggle_admin:".Length);
+                var updated = _repo.UpdateParams(uid, p => p.Admin = !p.Admin);
+                if (updated == null) { await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct); return; }
+                _auditLog.Write("toggle_admin", updated.TgId, updated.Comment, "admin=" + updated.Params.Admin);
+                await bot.AnswerCallbackQuery(cb.Id, updated.Params.Admin ? "👑  Lampac-админ выдан" : "👑  Lampac-админ снят", cancellationToken: ct);
+                await UpdateCardAsync(bot, chatId, msgId, uid, ct);
+                return;
+            }
+
+            if (data.StartsWith("bulkext:"))
+            {
+                if (!int.TryParse(data.Substring("bulkext:".Length), out int bulkDays))
+                {
+                    await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
+                    return;
+                }
+                string newExp = StoreExpiry(DateTime.Now.AddDays(bulkDays));
+                int affected = _repo.ExtendWhere(u => ParseExpiry(u.Expires) >= DateTime.UtcNow, newExp);
+                _auditLog.Write("bulk_extend", 0, "all_active", "+" + bulkDays + "d x" + affected);
+                await bot.AnswerCallbackQuery(cb.Id, "✅  Продлено", cancellationToken: ct);
+                await bot.EditMessageText(chatId, msgId,
+                    "✅  <b>Продлено всем активным</b>\n\nЗатронуто пользователей: <b>" + affected + "</b>\nНовый срок: +" + bulkDays + " дн.",
+                    parseMode: ParseMode.Html, cancellationToken: ct);
                 return;
             }
 
@@ -913,7 +1075,7 @@ namespace TelegramBot.Services
                 if (user == null) { await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct); return; }
                 await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
                 await bot.EditMessageText(chatId, msgId,
-                    "🗑  Удалить <b>" + user.Comment + "</b>?\n\nЭто действие необратимо.",
+                    "🗑  Удалить <b>" + H(user.Comment) + "</b>?\n\nЭто действие необратимо.",
                     parseMode: ParseMode.Html,
                     replyMarkup: new InlineKeyboardMarkup(new[]
                     {
@@ -930,20 +1092,17 @@ namespace TelegramBot.Services
             if (data.StartsWith("del_confirm:"))
             {
                 string uid  = data.Substring("del_confirm:".Length);
-                var ul   = _repo.ReadAll();
-                var user = ul.FirstOrDefault(u => u.Id == uid);
+                var user = _repo.Remove(uid);
                 if (user != null)
                 {
-                    ul.Remove(user);
-                    _repo.WriteAll(ul);
                     _auditLog.Write("delete", user.TgId, user.Comment);
                     await bot.AnswerCallbackQuery(cb.Id, "🗑  Удалён", cancellationToken: ct);
                     await bot.EditMessageText(chatId, msgId,
-                        "🗑  <b>" + user.Comment + "</b>  удалён.",
+                        "🗑  <b>" + H(user.Comment) + "</b>  удалён.",
                         parseMode: ParseMode.Html,
                         replyMarkup: new InlineKeyboardMarkup(new[]
                         {
-                            new[] { InlineKeyboardButton.WithCallbackData("‹  К списку", "list:0") }
+                            new[] { InlineKeyboardButton.WithCallbackData("‹  К списку", "list:all:0") }
                         }),
                         cancellationToken: ct);
                 }
@@ -976,7 +1135,7 @@ namespace TelegramBot.Services
                     return;
                 }
                 var exp = DateTime.Now.AddDays(_conf.default_expire_days);
-                string newToken = LampacUser.GenerateToken();
+                string newToken = _repo.GenerateUniqueToken();
                 _repo.AddOrReplace(new LampacUser
                 {
                     Id      = newToken, TgId = newTgId, Group = 1,
@@ -989,7 +1148,7 @@ namespace TelegramBot.Services
                 await bot.EditMessageText(chatId, msgId,
                     "✅  <b>Пользователь добавлен</b>\n\n" +
                     "┌  <b>" + comment + "</b>\n" +
-                    "│  🆔 TG:  <code>" + nid + "</code>\n" +
+                    "│  🆔  TG:  <code>" + nid + "</code>\n" +
                     "│  🔑  <code>" + newToken + "</code>\n" +
                     "│  📅  до  <b>" + exp.ToString("dd.MM.yyyy") + "</b>\n" +
                     "└─────────────────",
@@ -997,7 +1156,7 @@ namespace TelegramBot.Services
                     replyMarkup: new InlineKeyboardMarkup(new[]
                     {
                         new[] { InlineKeyboardButton.WithCallbackData("👤  Открыть карточку", "user:" + newToken) },
-                        new[] { InlineKeyboardButton.WithCallbackData("‹  К списку",          "list:0") }
+                        new[] { InlineKeyboardButton.WithCallbackData("‹  К списку",          "list:all:0") }
                     }),
                     cancellationToken: ct);
                 try { await bot.SendMessage(newTgId,
@@ -1029,6 +1188,9 @@ namespace TelegramBot.Services
                     if (u.TgId == 0) continue;
                     try   { await bot.SendMessage(u.TgId, "📢  " + message, cancellationToken: ct); sent++; }
                     catch { failed++; }
+                    // ponytail: flat delay keeps us under Telegram's ~30 msg/s global limit;
+                    // switch to a token-bucket if broadcasts start hitting real 429s
+                    await Task.Delay(35, ct);
                 }
 
                 await bot.AnswerCallbackQuery(cb.Id, "✅  Отправлено", cancellationToken: ct);
@@ -1054,7 +1216,7 @@ namespace TelegramBot.Services
                 req ??= new PendingRequest { TelegramId = uid };
                 var exp     = DateTime.Now.AddDays(_conf.default_expire_days);
                 string comment = BuildComment(req);
-                string token = LampacUser.GenerateToken();
+                string token = _repo.GenerateUniqueToken();
                 _repo.AddOrReplace(new LampacUser
                 {
                     Id      = token, TgId = uid, Group = 1,
@@ -1065,7 +1227,7 @@ namespace TelegramBot.Services
                 _auditLog.Write("approve", uid, comment);
                 await bot.AnswerCallbackQuery(cb.Id, "✅  Одобрено", cancellationToken: ct);
                 await bot.EditMessageText(chatId, msgId,
-                    "✅  <b>Одобрено</b>: " + comment + "\n📅  до " + exp.ToString("dd.MM.yyyy"),
+                    "✅  <b>Одобрено</b>: " + H(comment) + "\n📅  до " + exp.ToString("dd.MM.yyyy"),
                     parseMode: ParseMode.Html, cancellationToken: ct);
                 try { await bot.SendMessage(uid,
                     "🎉  Доступ одобрен!\n📅  Действует до " + exp.ToString("dd.MM.yyyy") +
@@ -1082,7 +1244,7 @@ namespace TelegramBot.Services
                 _auditLog.Write("deny", uid, name);
                 await bot.AnswerCallbackQuery(cb.Id, "❌  Отклонено", cancellationToken: ct);
                 await bot.EditMessageText(chatId, msgId,
-                    "❌  <b>Отклонено</b>: " + name, parseMode: ParseMode.Html, cancellationToken: ct);
+                    "❌  <b>Отклонено</b>: " + H(name), parseMode: ParseMode.Html, cancellationToken: ct);
                 try { await bot.SendMessage(uid, "❌  Ваша заявка отклонена.", cancellationToken: ct); } catch { }
                 return;
             }

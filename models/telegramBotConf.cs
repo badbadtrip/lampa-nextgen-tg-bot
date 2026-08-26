@@ -11,5 +11,7 @@ namespace TelegramBot.Models
         public string users_file_path { get; set; } = "users.json";
 
         public int default_expire_days { get; set; } = 365;
+
+        public int notify_before_days { get; set; } = 7;
     }
 }

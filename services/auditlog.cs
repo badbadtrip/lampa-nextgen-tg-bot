@@ -1,5 +1,8 @@
+#nullable enable
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Microsoft.Extensions.Logging;
 
 namespace TelegramBot.Services
@@ -25,6 +28,16 @@ namespace TelegramBot.Services
             {
                 try { File.AppendAllText(_path, line + "\n"); }
                 catch (Exception ex) { _logger.LogWarning("[TelegramBot] AuditLog write failed: {Msg}", ex.Message); }
+            }
+        }
+
+        public List<string> ReadLast(int count)
+        {
+            lock (_lock)
+            {
+                if (!File.Exists(_path)) return new();
+                var lines = File.ReadAllLines(_path);
+                return lines.Skip(Math.Max(0, lines.Length - count)).ToList();
             }
         }
     }

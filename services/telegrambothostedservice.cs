@@ -91,8 +91,9 @@ namespace TelegramBot.Services
             {
                 await bot.SetMyCommands(new[]
                 {
-                    new Telegram.Bot.Types.BotCommand { Command = "start", Description = "Главное меню" },
-                    new Telegram.Bot.Types.BotCommand { Command = "help",  Description = "Помощь" }
+                    new Telegram.Bot.Types.BotCommand { Command = "start",  Description = "Главное меню" },
+                    new Telegram.Bot.Types.BotCommand { Command = "help",   Description = "Помощь" },
+                    new Telegram.Bot.Types.BotCommand { Command = "cancel", Description = "Отменить текущее действие" }
                 }, cancellationToken: ct).ConfigureAwait(false);
             }
             catch (Exception ex)

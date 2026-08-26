@@ -47,7 +47,8 @@ namespace TelegramBot
             bot_token          = "",
             admin_id           = 0,
             users_file_path    = "users.json",
-            default_expire_days = 365
+            default_expire_days = 365,
+            notify_before_days  = 7
         };
     }
 }
